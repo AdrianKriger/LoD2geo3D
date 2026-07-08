@@ -1,0 +1,24 @@
+{
+    "LargeArea": "Western Cape",
+    "FocusArea": "University Estate",
+    "osm_type": "relation",
+
+    "osm_bldings": "../data/fp_proj_z-ue.geojson",
+    
+    "in_raster": "../raster/LO19_050M_3318CD.tif",
+    "nodata": 3.402823466385289e+38,
+    "projClip_raster": "../raster/3318CDclip_utm34sV2.tif",
+    
+    "cjsn_out": "uEstateLoD2.json",
+    
+    "cjsn_title": "LoD1 City Model of University Estate, Cape Town",
+    "cjsn_referenceDate": "2026-06",
+    "cjsn_contactName": "arkriger", 
+    "cjsn_emailAddress": "adrian8kriger@gmail.com", 
+    "cjsn_website": "www.linkedin.com/in/adrian-kriger", 
+    "cjsn_contactType": "private",
+	"cjsn_+meta-description": "City of Cape Town",
+	"cjsn_+meta-sourceSpatialResolution": "Resampled 10 meter raster DEM",
+    "cjsn_+meta-sourceReferenceSystem": "urn:ogc:def:crs:EPSG:20482",
+    "cjsn_+meta-sourceCitation":"https://odp-cctegis.opendata.arcgis.com/documents/cctegis::draft-ground-level-map-5m-dem-cct-glm-2019/about"
+}
