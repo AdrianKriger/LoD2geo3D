@@ -1,6 +1,8 @@
 ## LoD2geo3D
 
-**LoD2geo3D** is a companion repository to [***geo3D***]{https://github.com/AdrianKriger/geo3D} that demonstrates spatial data science workflows with an **LoD2** city model.
+![LoD2](docs//uEstateLoD2.png)
+
+**LoD2geo3D** is a companion repository to [***geo3D***](https://github.com/AdrianKriger/geo3D) that demonstrates spatial data science workflows with an **LoD2** city model.
 
 The repository extends the `CityJSONdataScience` notebook from simple LoD1 building blocks to richer roof-resolved 3D urban geometry, supporting higher-order (more precise) exploratory analysis of building form, volume, and urban sustainability indicators.
 
