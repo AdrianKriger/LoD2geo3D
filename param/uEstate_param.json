@@ -9,7 +9,7 @@
     "nodata": 3.402823466385289e+38,
     "projClip_raster": "../raster/3318CDclip_utm34sV2.tif",
     
-    "cjsn_out": "uEstateLoD2.json",
+    "cjsn_out": "./result/uEstateLoD2.json",
     
     "cjsn_title": "LoD1 City Model of University Estate, Cape Town",
     "cjsn_referenceDate": "2026-06",
