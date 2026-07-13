@@ -130,7 +130,8 @@ class GeoDataFrameLite(pd.DataFrame):
 def extract_lod_surfaces(buildings, vertices, transform_meta=None, crs_name="EPSG:32734"):
     """
     Parses CityJSON 2.0 CityObjects, resolves LoD1/LoD2 semantics by cross-referencing
-    the 'values' shell mapping array, and returns a real-world scaled FeatureCollection.
+    the 'values' shell mapping array, classifies LoD1 surfaces geometrically, and 
+    returns a complete real-world scaled FeatureCollection without culling features.
     """
     extracted_features = []
     
@@ -142,6 +143,21 @@ def extract_lod_surfaces(buildings, vertices, transform_meta=None, crs_name="EPS
         b_attributes = building.get('attributes', {})
         geometries = building.get('geometry', [])
 
+        # If a building object has no structural geometry listed, preserve its record anyway as a fallback point
+        if not geometries:
+            extracted_features.append({
+                'type': 'Feature',
+                'properties': {
+                    'building_id': b_id,
+                    'lod': 'None',
+                    'surface_type': 'NoGeometry',
+                    '3d_area': 0.0,
+                    **{f'attr_{k}': v for k, v in b_attributes.items()}
+                },
+                'geometry': None
+            })
+            continue
+
         for geom in geometries:
             geom_type = geom.get('type', '').lower()
             boundaries = geom.get('boundaries', [])
@@ -149,15 +165,15 @@ def extract_lod_surfaces(buildings, vertices, transform_meta=None, crs_name="EPS
             
             faces_to_process = []
 
-            # --- CASE 1: HANDLE LoD1 ---
+            # --- CASE 1: HANDLE LoD1 (Retain all surfaces, tag as Generic for now) ---
             if lod_val.startswith('1'):
                 if geom_type == 'solid':
                     for shell in boundaries:
                         for face in shell:
-                            faces_to_process.append(('GenericSurface', face[0]))
+                            faces_to_process.append(('GenericSurface', face))
                 else:
                     for face in boundaries:
-                        faces_to_process.append(('GenericSurface', face[0]))
+                        faces_to_process.append(('GenericSurface', face))
 
             # --- CASE 2: HANDLE LoD2 (CityJSON 2.0 Schema Fixed) ---
             elif lod_val.startswith('2'):
@@ -166,97 +182,142 @@ def extract_lod_surfaces(buildings, vertices, transform_meta=None, crs_name="EPS
                 semantic_values = semantics.get('values', [])
 
                 if not surfaces_templates or not semantic_values:
-                    continue
-
-                if geom_type == 'solid':
-                    # Loop through shells and faces using standard indexing positions
-                    for shell_idx, shell in enumerate(boundaries):
-                        for face_idx, face in enumerate(shell):
+                    # Fallback if semantics are missing in an LoD2 object
+                    if geom_type == 'solid':
+                        for shell in boundaries:
+                            for face in shell:
+                                faces_to_process.append(('Unclassified', face))
+                    else:
+                        for face in boundaries:
+                            faces_to_process.append(('Unclassified', face))
+                else:
+                    if geom_type == 'solid':
+                        for shell_idx, shell in enumerate(boundaries):
+                            for face_idx, face in enumerate(shell):
+                                try:
+                                    sem_idx = semantic_values[shell_idx][face_idx]
+                                    surface_type = surfaces_templates[sem_idx].get('type', 'Unknown') if sem_idx is not None else 'Unclassified'
+                                    faces_to_process.append((surface_type, face))
+                                except (IndexError, TypeError):
+                                    continue
+                    else:
+                        for face_idx, face in enumerate(boundaries):
                             try:
-                                # Look up surface template index out of the nested values shell mapping
-                                sem_idx = semantic_values[shell_idx][face_idx]
-                                if sem_idx is not None:
-                                    surface_type = surfaces_templates[sem_idx].get('type', 'Unknown')
-                                else:
-                                    surface_type = 'Unclassified'
-                                # CityJSON Solid geometry faces are wrapped in an outer list ring: [ [v1, v2, v3] ]
-                                faces_to_process.append((surface_type, face[0]))
+                                sem_idx = semantic_values[face_idx]
+                                surface_type = surfaces_templates[sem_idx].get('type', 'Unknown') if sem_idx is not None else 'Unclassified'
+                                faces_to_process.append((surface_type, face))
                             except (IndexError, TypeError):
                                 continue
-                else:
-                    # MultiSurface / CompositeSurface tracking
-                    for face_idx, face in enumerate(boundaries):
-                        try:
-                            sem_idx = semantic_values[face_idx]
-                            if sem_idx is not None:
-                                surface_type = surfaces_templates[sem_idx].get('type', 'Unknown')
-                            else:
-                                surface_type = 'Unclassified'
-                            faces_to_process.append((surface_type, face[0]))
-                        except (IndexError, TypeError):
-                            continue
+            
+            # --- CASE 3: CATCH FOOTPRINTS OR alternative LoDs (Prevents losing the building entry) ---
             else:
-                continue
+                if geom_type == 'solid':
+                    for shell in boundaries:
+                        for face in shell:
+                            faces_to_process.append((f'LoD{lod_val}_Surface', face))
+                else:
+                    for face in boundaries:
+                        faces_to_process.append((f'LoD{lod_val}_Surface', face))
 
-            # --- 3D VECTOR MATH & TRANSFORM PIPELINE ---
-            for surface_type, face_vertices_indices in faces_to_process:
-                # 1. Transform raw integer vertices back into real-world coordinates immediately
-                face_coords = []
-                for v_idx in face_vertices_indices:
-                    raw_v = vertices[v_idx]
-                    real_x = (raw_v[0] * scale[0]) + translate[0]
-                    real_y = (raw_v[1] * scale[1]) + translate[1]
-                    real_z = (raw_v[2] * scale[2]) + translate[2]
-                    face_coords.append([real_x, real_y, real_z])
+            # --- PROCESS VECTORS, PLANES & ACCURATE AREA PER FACET ---
+            for surface_type, face_rings in faces_to_process:
+                if not face_rings or len(face_rings[0]) < 3:
+                    continue
                 
-                if len(face_coords) < 3:
+                true_3d_area = 0.0
+                facet_pts_arr = None
+                
+                for ring_idx, ring_vertices_indices in enumerate(face_rings):
+                    ring_coords = []
+                    for v_idx in ring_vertices_indices:
+                        raw_v = vertices[v_idx]
+                        real_x = (raw_v[0] * scale[0]) + translate[0]
+                        real_y = (raw_v[1] * scale[1]) + translate[1]
+                        real_z = (raw_v[2] * scale[2]) + translate[2]
+                        ring_coords.append([real_x, real_y, real_z])
+                        
+                    if len(ring_coords) < 3:
+                        continue
+                        
+                    if ring_coords[0] != ring_coords[-1]:
+                        unique_pts = np.array(ring_coords)
+                    else:
+                        unique_pts = np.array(ring_coords[:-1])
+                        
+                    if ring_idx == 0:
+                        facet_pts_arr = np.array(ring_coords)
+                        
+                    raw_area_vector = np.zeros(3)
+                    for i in range(len(unique_pts)):
+                        p0 = unique_pts[i]
+                        p1 = unique_pts[(i + 1) % len(unique_pts)]
+                        raw_area_vector[0] += (p0[1] - p1[1]) * (p0[2] + p1[2])
+                        raw_area_vector[1] += (p0[2] - p1[2]) * (p0[0] + p1[0])
+                        raw_area_vector[2] += (p0[0] - p1[0]) * (p0[1] + p1[1])
+                        
+                    ring_area = 0.5 * np.linalg.norm(raw_area_vector)
+                    
+                    if ring_idx == 0:
+                        true_3d_area += ring_area
+                    else:
+                        true_3d_area -= ring_area
+
+                if facet_pts_arr is None or true_3d_area <= 0:
                     continue
 
-                # Ensure polygon ring closure
-                if face_coords[0] != face_coords[-1]:
-                    unique_pts = np.array(face_coords)
-                    face_coords.append(face_coords[0])
-                else:
-                    unique_pts = np.array(face_coords[:-1])
-
-                pts = np.array(face_coords)
-
-                # 2. Compute true real-world surface normals
-                v1 = pts[1] - pts[0]
-                v2 = pts[2] - pts[0]
+                unit_normal = np.array([0.0, 0.0, 1.0])
+                has_valid_plane = False
+                
+                v1 = facet_pts_arr[1] - facet_pts_arr[0]
+                v2 = facet_pts_arr[2] - facet_pts_arr[0]
                 normal = np.cross(v1, v2)
                 norm_len = np.linalg.norm(normal)
-                if norm_len == 0:
-                    continue
-                unit_normal = normal / norm_len
+                
+                if norm_len <= 1e-6 and len(facet_pts_arr) > 3:
+                    v1 = facet_pts_arr[2] - facet_pts_arr[1]
+                    v2 = facet_pts_arr[3] - facet_pts_arr[1]
+                    normal = np.cross(v1, v2)
+                    norm_len = np.linalg.norm(normal)
 
-                # 3. Newell's Method for true 3D Area (now in square meters!)
-                raw_area_vector = np.zeros(3)
-                for i in range(len(unique_pts)):
-                    p0 = unique_pts[i]
-                    p1 = unique_pts[(i + 1) % len(unique_pts)]
-                    raw_area_vector += np.cross(p0, p1)
-                true_3d_area = 0.5 * np.linalg.norm(raw_area_vector)
+                raw_z_direction = normal[2] if norm_len > 1e-6 else 1.0
 
-                # 4. Tilt & Aspect Angle Orientations
-                cos_tilt = abs(unit_normal[2])
-                tilt_degrees = np.degrees(np.arccos(np.clip(cos_tilt, -1.0, 1.0)))
-                aspect_degrees = np.degrees(np.arctan2(unit_normal[0], unit_normal[1])) % 360
+                if norm_len > 1e-6:
+                    unit_normal = normal / norm_len
+                    if unit_normal[2] < 0:
+                        unit_normal = -unit_normal
+                    has_valid_plane = True
 
-                # 5. Extract flat real-world XY footprints for GeoJSON serialization
-                #xy_footprint_coords = [[float(p[0]), float(p[1])] for p in face_coords]
-                # Inside your surface extraction loop, save the full 3D coordinates:
-                xyz_3d_coords = [[float(p[0]), float(p[1]), float(p[2])] for p in face_coords]
+                inclination_rad = np.arccos(np.clip(unit_normal[2], -1.0, 1.0))
+                tilt_degrees = np.degrees(inclination_rad)
+                
+                if has_valid_plane and tilt_degrees > 0.01:
+                    aspect_degrees = np.degrees(np.arctan2(unit_normal[0], unit_normal[1])) % 360
+                else:
+                    tilt_degrees = 0.0
+                    aspect_degrees = 0.0
 
+                # =========================================================================
+                # GEOMETRIC CLASSIFICATION FOR LoD1 (NO CULLING)
+                # =========================================================================
+                if lod_val.startswith('1') and surface_type == 'GenericSurface':
+                    if 45.0 < tilt_degrees < 135.0:
+                        surface_type = "WallSurface"
+                    elif raw_z_direction < 0:
+                        surface_type = "GroundSurface"
+                    else:
+                        surface_type = "RoofSurface"
+                # =========================================================================
+
+                xyz_3d_coords = [[float(p[0]), float(p[1]), float(p[2])] for p in facet_pts_arr]
+                
                 properties = {
                     'building_id': b_id,
                     'lod': lod_val,
                     'surface_type': surface_type,
-                    'geometry_type': geom_type,
                     '3d_area': float(true_3d_area),
-                    'tilt_deg': float(tilt_degrees),
-                    'aspect_deg': float(aspect_degrees),
-                    'mean_z_absolute': float(np.mean(pts[:, 2]))
+                    'tilt_deg': round(float(tilt_degrees), 2),
+                    'aspect_deg': round(float(aspect_degrees), 2),
+                    'mean_z_absolute': float(np.mean(facet_pts_arr[:, 2]))
                 }
 
                 for k, v in b_attributes.items():
