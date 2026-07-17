@@ -1,6 +1,6 @@
 ## LoD2geo3D
 
-![LoD2](docs//uEstateLoD2.jpg)
+![LoD2](docs/uEstateLoD2.jpg)
 
 **LoD2geo3D** is a companion repository to [***geo3D***](https://github.com/AdrianKriger/geo3D) that demonstrates spatial data science workflows with an **LoD2** city model.
 
